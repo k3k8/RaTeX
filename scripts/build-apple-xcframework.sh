@@ -22,11 +22,27 @@ cleanup() {
   if [[ -n "${SIM_DIR-}" && -d "$SIM_DIR" ]]; then rm -rf "$SIM_DIR"; fi
   if [[ -n "${MAC_DIR-}" && -d "$MAC_DIR" ]]; then rm -rf "$MAC_DIR"; fi
   if [[ -n "${CATALYST_DIR-}" && -d "$CATALYST_DIR" ]]; then rm -rf "$CATALYST_DIR"; fi
+  if [[ -n "${STAGED_HEADERS-}" && -d "$STAGED_HEADERS" ]]; then rm -rf "$STAGED_HEADERS"; fi
 }
 trap cleanup EXIT
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HEADER_DIR="$REPO_ROOT/crates/ratex-ffi/include"
+
+# The headers go one level down, in Headers/RaTeXFFI/ (ratex.h + module.modulemap).
+# Xcode copies the Headers/ of every static-library XCFramework into
+# $(BUILT_PRODUCTS_DIR)/include/, so a module.modulemap directly in Headers/
+# collides with any other XCFramework laid out the same way (e.g. libghostty-vt):
+#   error: Multiple commands produce '.../include/module.modulemap'
+STAGED_HEADERS=$(mktemp -d)
+mkdir -p "$STAGED_HEADERS/RaTeXFFI"
+cp "$HEADER_DIR/ratex.h" "$STAGED_HEADERS/RaTeXFFI/"
+cat > "$STAGED_HEADERS/RaTeXFFI/module.modulemap" << 'EOF'
+module RaTeXFFI {
+    header "ratex.h"
+    export *
+}
+EOF
 OUTPUT="$REPO_ROOT/platforms/ios/RaTeX.xcframework"
 BUILD_IOS=true
 BUILD_MACOS=true
@@ -109,8 +125,8 @@ if $BUILD_IOS; then
       "$REPO_ROOT/target/x86_64-apple-ios/release/libratex_ffi.a" \
       -output "$SIM_DIR/libratex_ffi.a"
 
-  LIBS+=(-library "$REPO_ROOT/target/aarch64-apple-ios/release/libratex_ffi.a" -headers "$HEADER_DIR")
-  LIBS+=(-library "$SIM_DIR/libratex_ffi.a" -headers "$HEADER_DIR")
+  LIBS+=(-library "$REPO_ROOT/target/aarch64-apple-ios/release/libratex_ffi.a" -headers "$STAGED_HEADERS")
+  LIBS+=(-library "$SIM_DIR/libratex_ffi.a" -headers "$STAGED_HEADERS")
 
   echo "==> Verifying iOS static libraries do not reference Rust's unwind personality..."
   bash "$REPO_ROOT/scripts/verify-apple-static-libraries.sh" \
@@ -139,7 +155,7 @@ if $BUILD_MACOS; then
       "$REPO_ROOT/target/x86_64-apple-darwin/release/libratex_ffi.a" \
       -output "$MAC_DIR/libratex_ffi.a"
 
-  LIBS+=(-library "$MAC_DIR/libratex_ffi.a" -headers "$HEADER_DIR")
+  LIBS+=(-library "$MAC_DIR/libratex_ffi.a" -headers "$STAGED_HEADERS")
 fi
 
 # ---------------------------------------------------------------------------
@@ -161,7 +177,7 @@ if $BUILD_CATALYST; then
       "$REPO_ROOT/target/x86_64-apple-ios-macabi/release/libratex_ffi.a" \
       -output "$CATALYST_DIR/libratex_ffi.a"
 
-  LIBS+=(-library "$CATALYST_DIR/libratex_ffi.a" -headers "$HEADER_DIR")
+  LIBS+=(-library "$CATALYST_DIR/libratex_ffi.a" -headers "$STAGED_HEADERS")
 
   echo "==> Verifying Mac Catalyst static library does not reference Rust's unwind personality..."
   bash "$REPO_ROOT/scripts/verify-apple-static-libraries.sh" "$CATALYST_DIR/libratex_ffi.a"
@@ -173,16 +189,6 @@ fi
 echo "==> Packaging XCFramework..."
 rm -rf "$OUTPUT"
 xcodebuild -create-xcframework "${LIBS[@]}" -output "$OUTPUT"
-
-echo "==> Adding module.modulemap to XCFramework headers..."
-for HDIR in "$OUTPUT"/*/Headers; do
-  cat > "$HDIR/module.modulemap" << 'EOF'
-module RaTeXFFI {
-    header "ratex.h"
-    export *
-}
-EOF
-done
 
 echo "==> Done: $OUTPUT"
 echo "   Slices:"
